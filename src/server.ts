@@ -1,35 +1,47 @@
-import { WebSocketServer, WebSocket } from 'ws';
-import http from 'http';
 import express from 'express';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import helmet from 'helmet';
-import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
-import { handleAuth } from './handlers/authHandler';
-import { handleLobby } from './handlers/lobbyHandler';
-import { handleGame } from './handlers/gameHandler';
-import { handleSession } from './handlers/sessionHandler';
-import { logger } from './utils/logger';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  healthCheckHandler,
+  detailedHealthCheckHandler,
+  debugConnectionsHandler,
+  trackClientConnect,
+  trackClientDisconnect,
+  trackMessageReceived,
+  trackMessageSent,
+  trackError
+} from './health-monitor';
 
+// Load environment variables
 dotenv.config();
 
+// Create Express app
 const app = express();
+
+// Apply middleware
 app.use(cors());
 app.use(helmet());
 app.use(express.json());
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
+// Health check endpoints
+app.get('/health', healthCheckHandler);
+app.get('/health/detailed', detailedHealthCheckHandler);
+app.get('/debug/connections', debugConnectionsHandler);
 
+// Create HTTP server
 const server = http.createServer(app);
+
+// Create WebSocket server
 const wss = new WebSocketServer({ server });
 
 // Store client connections
 interface Client {
   id: string;
-  ws: WebSocket;
+  ws: any;
   playerId: string | null;
   playerName: string | null;
   sessionId: string | null;
@@ -37,7 +49,8 @@ interface Client {
 
 const clients = new Map<string, Client>();
 
-wss.on('connection', (ws: WebSocket) => {
+// WebSocket connection handler
+wss.on('connection', (ws) => {
   const clientId = uuidv4();
   
   // Initialize client
@@ -50,91 +63,121 @@ wss.on('connection', (ws: WebSocket) => {
   };
   
   clients.set(clientId, client);
-  logger.info(`Client connected: ${clientId}`);
-
+  console.log(`Client connected: ${clientId}`);
+  
+  // Track connection in metrics
+  trackClientConnect(clientId);
+  
   // Send welcome message
   ws.send(JSON.stringify({
     type: 'connection_status',
     data: { connected: true, clientId }
   }));
-
+  trackMessageSent();
+  
+  // Handle messages
   ws.on('message', async (message: string) => {
     try {
       const parsedMessage = JSON.parse(message.toString());
       const { type, data } = parsedMessage;
       
-      logger.info(`Received message type: ${type} from client: ${clientId}`);
-
-      // Route message to appropriate handler
+      console.log(`Received message type: ${type} from client: ${clientId}`);
+      trackMessageReceived(clientId);
+      
+      // Process message based on type
       switch (type) {
         case 'auth':
-          await handleAuth(ws, data, client, clients);
+          // Handle authentication
+          if (data && data.playerId) {
+            client.playerId = data.playerId;
+            client.playerName = data.playerName || 'Anonymous';
+            
+            ws.send(JSON.stringify({
+              type: 'auth_success',
+              data: { playerId: client.playerId, playerName: client.playerName }
+            }));
+            trackMessageSent();
+          }
           break;
-        case 'join_game_session':
-        case 'leave_game_session':
-          await handleSession(ws, type, data, client, clients);
-          break;
-        case 'game_action':
-          await handleGame(ws, data, client, clients);
-          break;
-        case 'create_lobby':
-        case 'join_lobby':
-        case 'leave_lobby':
-        case 'ready':
-        case 'start_game':
-          await handleLobby(ws, type, data, client, clients);
-          break;
-        default:
+          
+        case 'ping':
+          // Respond to ping
           ws.send(JSON.stringify({
-            type: 'error',
-            data: { message: `Unknown message type: ${type}` }
+            type: 'pong',
+            data: { timestamp: new Date().toISOString() }
           }));
+          trackMessageSent();
+          break;
+          
+        case 'echo':
+          // Echo back the message (useful for testing)
+          ws.send(JSON.stringify({
+            type: 'echo_response',
+            data: data,
+            timestamp: new Date().toISOString()
+          }));
+          trackMessageSent();
+          break;
+          
+        default:
+          // Forward to appropriate handler based on message type
+          // This is where you would add your game-specific logic
+          ws.send(JSON.stringify({
+            type: 'ack',
+            data: { messageType: type, received: true }
+          }));
+          trackMessageSent();
       }
     } catch (error) {
-      logger.error('Error processing message:', error);
+      console.error('Error processing message:', error);
+      trackError(error as Error);
+      
       ws.send(JSON.stringify({
         type: 'error',
         data: { message: 'Error processing message' }
       }));
+      trackMessageSent();
     }
   });
-
+  
+  // Handle disconnection
   ws.on('close', () => {
-    // Handle client disconnection
-    const client = clients.get(clientId);
-    if (client && client.sessionId) {
-      // Notify other clients in the same session
-      broadcastToSession(client.sessionId, {
-        type: 'player_disconnected',
-        data: { playerId: client.playerId }
-      }, clientId);
-    }
+    console.log(`Client disconnected: ${clientId}`);
     
+    // Clean up
     clients.delete(clientId);
-    logger.info(`Client disconnected: ${clientId}`);
+    trackClientDisconnect(clientId);
   });
-});
-
-// Utility function to broadcast to all clients in a session
-function broadcastToSession(sessionId: string, message: any, excludeClientId?: string) {
-  for (const [id, client] of clients.entries()) {
-    if (client.sessionId === sessionId && id !== excludeClientId) {
-      client.ws.send(JSON.stringify(message));
+  
+  // Handle errors
+  ws.on('error', (error) => {
+    console.error(`WebSocket error for client ${clientId}:`, error);
+    trackError(error);
+  });
+  
+  // Set up ping interval to keep connection alive
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.ping();
+    } else {
+      clearInterval(pingInterval);
     }
-  }
-}
+  }, 30000);
+});
 
 // Start the server
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  logger.info(`WebSocket server is running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`Health check available at http://localhost:${PORT}/health`);
+  console.log(`WebSocket server available at ws://localhost:${PORT}`);
 });
 
 // Handle graceful shutdown
 process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down...');
+  console.log('SIGTERM received, shutting down...');
   server.close(() => {
-    logger.info('Server closed');
+    console.log('Server closed');
     process.exit(0);
   });
 });
