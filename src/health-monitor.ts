@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { WebSocketServer } from 'ws';
+import { Server as WebSocketServer } from 'ws';
 import os from 'os';
 
 // Store server metrics
@@ -88,82 +88,106 @@ export function trackError(error: Error): void {
 
 // Basic health check handler
 export function healthCheckHandler(req: Request, res: Response): void {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor((Date.now() - metrics.startTime) / 1000),
-    connections: metrics.connections.active,
-  });
+  try {
+    res.status(200).json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: Math.floor((Date.now() - metrics.startTime) / 1000),
+      connections: metrics.connections.active,
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({ status: 'error', message: 'Health check failed' });
+  }
 }
 
 // Detailed health check handler
 export function detailedHealthCheckHandler(req: Request, res: Response): void {
-  // Get active connections (activity in last 60 seconds)
-  const now = Date.now();
-  let activeConnections = 0;
-  
-  clientActivity.forEach((client) => {
-    if (now - client.lastActivity < 60000) {
-      activeConnections++;
-    }
-  });
-  
-  // Calculate memory usage in MB
-  const memoryUsage = process.memoryUsage();
-  const formattedMemory = {
-    rss: Math.round(memoryUsage.rss / 1024 / 1024),
-    heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
-    heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
-    external: Math.round(memoryUsage.external / 1024 / 1024),
-  };
-  
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor((Date.now() - metrics.startTime) / 1000),
-    connections: {
-      total: metrics.connections.total,
-      current: metrics.connections.active,
-      active: activeConnections,
-    },
-    messages: metrics.messages,
-    errors: {
-      count: metrics.errors,
-      lastError: metrics.lastError,
-    },
-    system: {
-      platform: process.platform,
-      arch: process.arch,
-      nodeVersion: process.version,
-      cpus: os.cpus().length,
-      loadAvg: os.loadavg(),
-      memory: {
-        total: Math.round(os.totalmem() / 1024 / 1024),
-        free: Math.round(os.freemem() / 1024 / 1024),
-        process: formattedMemory,
+  try {
+    // Get active connections (activity in last 60 seconds)
+    const now = Date.now();
+    let activeConnections = 0;
+    
+    clientActivity.forEach((client) => {
+      if (now - client.lastActivity < 60000) {
+        activeConnections++;
+      }
+    });
+    
+    // Calculate memory usage in MB
+    const memoryUsage = process.memoryUsage();
+    const formattedMemory = {
+      rss: Math.round(memoryUsage.rss / 1024 / 1024),
+      heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+      heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+      external: Math.round(memoryUsage.external / 1024 / 1024),
+    };
+    
+    res.status(200).json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: Math.floor((Date.now() - metrics.startTime) / 1000),
+      connections: {
+        total: metrics.connections.total,
+        current: metrics.connections.active,
+        active: activeConnections,
       },
-    },
-    environment: process.env.NODE_ENV || 'development',
-  });
+      messages: metrics.messages,
+      errors: {
+        count: metrics.errors,
+        lastError: metrics.lastError,
+      },
+      system: {
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        cpus: os.cpus().length,
+        loadAvg: os.loadavg(),
+        memory: {
+          total: Math.round(os.totalmem() / 1024 / 1024),
+          free: Math.round(os.freemem() / 1024 / 1024),
+          process: formattedMemory,
+        },
+      },
+      environment: process.env.NODE_ENV || 'development',
+    });
+  } catch (error) {
+    console.error('Detailed health check error:', error);
+    res.status(500).json({ status: 'error', message: 'Detailed health check failed' });
+  }
 }
 
 // Debug connections handler
 export function debugConnectionsHandler(req: Request, res: Response): void {
-  const connectionData: any[] = [];
-  
-  clientActivity.forEach((client, id) => {
-    connectionData.push({
-      id,
-      connectedAt: new Date(client.connectedAt).toISOString(),
-      lastActivity: new Date(client.lastActivity).toISOString(),
-      messageCount: client.messageCount,
-      isActive: (Date.now() - client.lastActivity < 60000),
-      idleTime: Math.floor((Date.now() - client.lastActivity) / 1000),
+  try {
+    const connectionData: any[] = [];
+    
+    clientActivity.forEach((client, id) => {
+      connectionData.push({
+        id,
+        connectedAt: new Date(client.connectedAt).toISOString(),
+        lastActivity: new Date(client.lastActivity).toISOString(),
+        messageCount: client.messageCount,
+        isActive: (Date.now() - client.lastActivity < 60000),
+        idleTime: Math.floor((Date.now() - client.lastActivity) / 1000),
+      });
     });
-  });
+    
+    res.status(200).json({
+      total: connectionData.length,
+      connections: connectionData,
+    });
+  } catch (error) {
+    console.error('Debug connections error:', error);
+    res.status(500).json({ status: 'error', message: 'Debug connections failed' });
+  }
+}
+
+// Register all health endpoints to an Express app
+export function registerHealthEndpoints(app: any): void {
+  app.get('/health', healthCheckHandler);
+  app.get('/health/detailed', detailedHealthCheckHandler);
+  app.get('/health/connections', debugConnectionsHandler);
   
-  res.status(200).json({
-    total: connectionData.length,
-    connections: connectionData,
-  });
+  console.log('Health check endpoints registered: /health, /health/detailed, /health/connections');
 }

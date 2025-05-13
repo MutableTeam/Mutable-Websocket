@@ -1,4 +1,4 @@
-import { WebSocket } from 'ws';
+import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger';
 

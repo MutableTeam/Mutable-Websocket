@@ -1,4 +1,4 @@
-import { WebSocket } from 'ws';
+import WebSocket from 'ws';
 import { logger } from '../utils/logger';
 
 export async function handleAuth(
